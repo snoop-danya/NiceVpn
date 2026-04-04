@@ -1,4 +1,26 @@
 # bot.py - ПОЛНОСТЬЮ ПЕРЕРАБОТАННАЯ ВЕРСИЯ С ИСПРАВЛЕНИЯМИ
+import subprocess
+import sys
+
+def install_dependencies():
+    """Принудительная установка зависимостей"""
+    try:
+        import aiosqlite
+        print("✅ aiosqlite already installed")
+    except ImportError:
+        print("📦 Installing aiosqlite...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "aiosqlite==0.19.0"])
+    
+    try:
+        import aiohttp
+        print("✅ aiohttp already installed")
+    except ImportError:
+        print("📦 Installing aiohttp...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp==3.9.1"])
+
+# Вызовите функцию перед импортом остальных модулей
+install_dependencies()
+
 import asyncio
 import aiosqlite
 import logging
