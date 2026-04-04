@@ -2,6 +2,7 @@
 import subprocess
 import sys
 
+
 def install_dependencies():
     """Принудительная установка зависимостей"""
     try:
@@ -10,13 +11,14 @@ def install_dependencies():
     except ImportError:
         print("📦 Installing aiosqlite...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "aiosqlite==0.19.0"])
-    
+
     try:
         import aiohttp
         print("✅ aiohttp already installed")
     except ImportError:
         print("📦 Installing aiohttp...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "aiohttp==3.9.1"])
+
 
 # Вызовите функцию перед импортом остальных модулей
 install_dependencies()
@@ -30,7 +32,6 @@ import re
 import secrets
 import json
 import html  # Добавьте этот импорт
-
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -68,8 +69,10 @@ class RegisterStates(StatesGroup):
     waiting_for_password = State()
     waiting_for_support_message = State()  # Добавьте эту строку
 
+
 class SupportStates(StatesGroup):
     waiting_for_message = State()
+
 
 class LoginStates(StatesGroup):
     waiting_for_username = State()
@@ -114,7 +117,7 @@ def get_main_keyboard(user_role: str = "user") -> ReplyKeyboardMarkup:
         [KeyboardButton(text="🛒 Купить VPN")],
         [KeyboardButton(text="📜 История платежей")],
         [KeyboardButton(text="📋 История подписок")],
-        [KeyboardButton(text="📞 Поддержка")],  # Измените текст здесь
+        #[KeyboardButton(text="📞 Поддержка")],  # Измените текст здесь
         [KeyboardButton(text="❓ Помощь")]
     ]
 
@@ -125,6 +128,7 @@ def get_main_keyboard(user_role: str = "user") -> ReplyKeyboardMarkup:
         keyboard=buttons,
         resize_keyboard=True
     )
+
 
 def get_admin_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура админ панели"""
@@ -594,6 +598,8 @@ async def cancel_handler(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer("✅ Операция отменена.")
+
+
 # =========== ХЭНДЛЕРЫ ===========
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -882,8 +888,8 @@ async def topup_balance(message: Message, state: FSMContext):
         "Выберите сумму пополнения (мин. 100 ₽):\n\n"
         "📝 *Реквизиты для перевода:*\n"
         "🏦 Сбербанк\n"
-        "💳 Номер карты: `2202 2005 4632 9481`\n"
-        "👤 Получатель: Иванов Иван Иванович\n\n"
+        "💳 СБП Сбербанк: `79038889093`\n"
+        "👤 Получатель: Гаджикурбанов Курбан Ярметович\n\n"
         "После перевода нажмите кнопку с суммой, чтобы создать заявку.",
         parse_mode="Markdown",
         reply_markup=keyboard
@@ -966,9 +972,9 @@ async def create_payment_request(message: Message, amount: float, state: FSMCont
             f"⏳ Ожидайте подтверждения администратора.\n"
             f"Баланс пополнится автоматически после проверки.\n\n"
             f"💳 *Реквизиты для оплаты:*\n"
-            f"Карта Сбербанк: `2202 2005 4632 9481`\n"
-            f"Получатель: Иванов Иван Иванович\n\n"
-            f"❗ После перевода отправьте администратору номер заявки: {payment_id}",
+            f"СБП Сбербанк: `79038889093`\n"
+            f"Получатель: Гаджикурбанов Курбан Ярметович\n\n"
+            f"❗ После перевода отправьте администратору @Betkansky1 номер заявки: {payment_id}",
             parse_mode="Markdown"
         )
     else:
@@ -1189,7 +1195,7 @@ async def show_help(message: Message):
         "3. Выберите тариф и период\n"
         "4. Получите ваш VPN ключ\n\n"
         "📌 *Как использовать ключ:*\n"
-        "Используйте полученный ключ в приложении WireGuard или OpenVPN\n\n"
+        "Используйте полученный ключ в приложении HAPP или STRAISAND\n\n"
         "📌 *Связь с администратором:*\n"
         "Нажмите кнопку ниже для связи с администратором"
     )
@@ -1219,6 +1225,7 @@ async def admin_panel(message: Message):
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard()
     )
+
 
 
 @dp.message(F.text == "✅ Подтвердить платеж")
@@ -1255,7 +1262,7 @@ async def admin_confirm_payment(message: Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_payment_id)
 async def process_payment_confirmation(message: Message, state: FSMContext):
-    """Обработка подтверждения платежа"""
+    """Обработка подтверждения платежа с получением данных из БД"""
     try:
         payment_id = int(message.text.strip())
     except ValueError:
@@ -1263,10 +1270,71 @@ async def process_payment_confirmation(message: Message, state: FSMContext):
         return
 
     session = await db.get_session(message.from_user.id)
+
+    # Сначала получаем информацию о платеже из локальной БД
+    payment_info = None
+    async with aiosqlite.connect(db.db_path) as conn:
+        async with conn.execute(
+                "SELECT telegram_id, amount FROM pending_payments WHERE payment_id = ? OR id = ?",
+                (payment_id, payment_id)
+        ) as cursor:
+            payment_info = await cursor.fetchone()
+
+    # Подтверждаем платеж через API
     result = await SiteAPI.admin_complete_payment(session['session_token'], payment_id)
 
     if result['success']:
-        await message.answer(f"✅ {result.get('message', 'Платеж подтвержден')}")
+        # Если получили сумму из API или из локальной БД
+        payment_amount = result.get('amount', payment_info[1] if payment_info else 0)
+        user_id = result.get('user_id', 0)
+        new_balance = result.get('new_balance', 0)
+
+        # Находим telegram_id пользователя
+        user_telegram_id = payment_info[0] if payment_info else None
+
+        if not user_telegram_id and user_id:
+            async with aiosqlite.connect(db.db_path) as conn:
+                async with conn.execute(
+                        "SELECT telegram_id, username FROM user_sessions WHERE user_id = ?",
+                        (user_id,)
+                ) as cursor:
+                    user_data = await cursor.fetchone()
+                    if user_data:
+                        user_telegram_id = user_data[0]
+                        username = user_data[1]
+
+        # Отправляем уведомление пользователю
+        if user_telegram_id:
+            try:
+                await bot.send_message(
+                    user_telegram_id,
+                    f"✅ *Пополнение баланса подтверждено!*\n\n"
+                    f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                    f"💳 Ваш новый баланс: {new_balance:.2f} ₽\n\n"
+                    f"Спасибо за пополнение! Можете приобрести VPN тариф в разделе 🛒 Купить VPN",
+                    parse_mode="Markdown"
+                )
+                await message.answer(
+                    f"✅ Платеж #{payment_id} подтвержден!\n"
+                    f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                    f"📨 Уведомление отправлено пользователю"
+                )
+
+                # Удаляем из pending_payments
+                await db.delete_pending_payment(payment_id)
+
+            except Exception as e:
+                await message.answer(
+                    f"✅ Платеж #{payment_id} подтвержден!\n"
+                    f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                    f"⚠️ Не удалось отправить уведомление: {e}"
+                )
+        else:
+            await message.answer(
+                f"✅ Платеж #{payment_id} подтвержден!\n"
+                f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                f"⚠️ Не удалось найти пользователя для уведомления"
+            )
     else:
         await message.answer(f"❌ {result.get('message', 'Ошибка подтверждения')}")
 
@@ -1923,7 +1991,7 @@ async def process_ticket_id(message: Message, state: FSMContext):
 
 @dp.message(AdminStates.waiting_for_ticket_response)
 async def process_ticket_response(message: Message, state: FSMContext):
-    """Обработка ответа на обращение"""
+    """Обработка ответа на обращение (HTML версия)"""
     data = await state.get_data()
     ticket_id = data.get('current_ticket_id')
     response_text = message.text.strip()
@@ -1931,15 +1999,16 @@ async def process_ticket_response(message: Message, state: FSMContext):
     ticket = await db.get_ticket(ticket_id)
 
     if ticket:
-        # Отправляем ответ пользователю
+        # Экранируем специальные символы для HTML
+        import html
+        safe_response = html.escape(response_text)
+
+        # Отправляем ответ пользователю в HTML формате
         try:
             await bot.send_message(
                 ticket['telegram_id'],
-                f"💬 *Ответ от администратора*\n\n"
-                f"По вашему обращению #{ticket_id}:\n\n"
-                f"{response_text}\n\n"
-                f"Если вопрос решен, нажмите /close_ticket",
-                parse_mode="Markdown"
+                f"<b>💬 Ответ от администратора</b>\n\nПо вашему обращению #{ticket_id}:\n\n{safe_response}\n\nЕсли вопрос решен, нажмите /close_ticket",
+                parse_mode="HTML"
             )
 
             # Обновляем статус обращения
@@ -1951,15 +2020,41 @@ async def process_ticket_response(message: Message, state: FSMContext):
             ])
 
             await message.answer(
-                f"✅ Ответ отправлен пользователю!\n\n"
-                f"Дождитесь подтверждения от пользователя или закройте обращение вручную.",
+                f"✅ Ответ отправлен пользователю!\n\nДождитесь подтверждения от пользователя или закройте обращение вручную.",
                 reply_markup=keyboard
             )
         except Exception as e:
-            await message.answer(f"❌ Ошибка при отправке: {e}")
+            await message.answer(f"❌ Ошибка при отправке: {str(e)}")
 
     await state.clear()
 
+    @dp.message(Command("close_ticket"))
+    async def close_ticket_command(message: Message, state: FSMContext):
+        """Команда для закрытия обращения пользователем"""
+        session = await db.get_session(message.from_user.id)
+
+        if not session:
+            await message.answer("❌ Вы не авторизованы.")
+            return
+
+        # Ищем открытое обращение пользователя
+        async with aiosqlite.connect(db.db_path) as conn:
+            async with conn.execute(
+                    "SELECT id FROM support_tickets WHERE telegram_id = ? AND status IN ('open', 'answered') ORDER BY id DESC LIMIT 1",
+                    (message.from_user.id,)
+            ) as cursor:
+                ticket = await cursor.fetchone()
+
+                if ticket:
+                    ticket_id = ticket[0]
+                    await conn.execute(
+                        "UPDATE support_tickets SET status = 'closed' WHERE id = ?",
+                        (ticket_id,)
+                    )
+                    await conn.commit()
+                    await message.answer(f"✅ Обращение #{ticket_id} закрыто. Спасибо за обращение!")
+                else:
+                    await message.answer("❌ У вас нет открытых обращений.")
 
 @dp.callback_query(lambda c: c.data.startswith("ticket_resolved_"))
 async def ticket_resolved(callback: CallbackQuery):
@@ -2161,7 +2256,7 @@ async def admin_view_payments(message: Message):
 
 @dp.message(AdminStates.waiting_for_payment_id)
 async def process_payment_confirmation(message: Message, state: FSMContext):
-    """Обработка подтверждения платежа"""
+    """Обработка подтверждения платежа с уведомлением пользователя"""
     try:
         payment_id = int(message.text.strip())
     except ValueError:
@@ -2172,7 +2267,53 @@ async def process_payment_confirmation(message: Message, state: FSMContext):
     result = await SiteAPI.admin_complete_payment(session['session_token'], payment_id)
 
     if result['success']:
-        await message.answer(f"✅ {result.get('message', 'Платеж подтвержден')}")
+        # Получаем информацию о платеже
+        payment_amount = result.get('amount', 0)
+        user_id = result.get('user_id', 0)
+        new_balance = result.get('new_balance', 0)
+
+        # Находим telegram_id пользователя по user_id
+        user_telegram_id = None
+        async with aiosqlite.connect(db.db_path) as conn:
+            async with conn.execute(
+                    "SELECT telegram_id, username FROM user_sessions WHERE user_id = ?",
+                    (user_id,)
+            ) as cursor:
+                user_data = await cursor.fetchone()
+                if user_data:
+                    user_telegram_id = user_data[0]
+                    username = user_data[1]
+
+        # Отправляем уведомление пользователю
+        if user_telegram_id:
+            try:
+                await bot.send_message(
+                    user_telegram_id,
+                    f"✅ *Пополнение баланса подтверждено!*\n\n"
+                    f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                    f"💳 Ваш новый баланс: {new_balance:.2f} ₽\n\n"
+                    f"Спасибо за пополнение! Можете приобрести VPN тариф в разделе 🛒 Купить VPN",
+                    parse_mode="Markdown"
+                )
+                await message.answer(
+                    f"✅ Платеж подтвержден!\n"
+                    f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                    f"👤 Пользователь: {username}\n"
+                    f"📨 Уведомление отправлено пользователю"
+                )
+            except Exception as e:
+                await message.answer(
+                    f"✅ Платеж подтвержден!\n"
+                    f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                    f"👤 Пользователь: {username}\n"
+                    f"⚠️ Не удалось отправить уведомление пользователю: {e}"
+                )
+        else:
+            await message.answer(
+                f"✅ Платеж подтвержден!\n"
+                f"💰 Сумма: {payment_amount:.2f} ₽\n"
+                f"⚠️ Пользователь не найден в базе сессий"
+            )
     else:
         await message.answer(f"❌ {result.get('message', 'Ошибка подтверждения')}")
 
@@ -2351,6 +2492,7 @@ async def admin_manage_users_callback(callback: CallbackQuery):
         reply_markup=keyboard
     )
     await callback.answer()
+
 
 @dp.message(AdminStates.waiting_for_new_username)
 async def process_new_username(message: Message, state: FSMContext):
@@ -2638,7 +2780,6 @@ async def admin_stats(message: Message):
         )
 
 
-
 @dp.message(F.text == "◀️ Назад")
 async def admin_back(message: Message):
     """Возврат в главное меню"""
@@ -2843,7 +2984,7 @@ async def process_tariff_data_input(message: Message, state: FSMContext):
 
         await state.clear()
 
-        #поддержка
+        # поддержка
         # =========== ПОДДЕРЖКА ПОЛЬЗОВАТЕЛЕЙ (ПОЛНАЯ ВЕРСИЯ) ===========
 
         class SupportStates(StatesGroup):
@@ -2938,6 +3079,7 @@ async def process_tariff_data_input(message: Message, state: FSMContext):
 
             await state.clear()
             await message.answer("✅ Операция отменена.")
+
 
 # =========== ЗАПУСК БОТА ===========
 async def main():
