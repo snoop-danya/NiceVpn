@@ -1,20 +1,3 @@
-# Перейдите в папку проекта
-cd C:\Users\PC\PyCharmMiscProject
-
-# Создайте или отредактируйте requirements.txt
-echo "aiogram==3.4.1" > requirements.txt
-echo "aiosqlite==0.19.0" >> requirements.txt
-echo "aiohttp==3.9.1" >> requirements.txt
-echo "python-dotenv==1.0.0" >> requirements.txt
-
-# Проверьте содержимое
-cat requirements.txt
-
-# Добавьте файл в Git
-git add requirements.txt
-
-# Создайте коммит
-git commit -m "Add requirements.txt with all dependencies"
-
-# Отправьте на GitHub
-git push origin main
+aiogram==3.4.1
+aiosqlite==0.19.0
+aiohttp==3.9.1
