@@ -147,25 +147,48 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
         resize_keyboard=True
     )
 
+def is_trial_tariff(tariff: dict) -> bool:
+    """Определяет, является ли тариф пробным (цена 0 + слово 'проб'/'trial'/'бесплатн' в названии)"""
+    price = float(tariff.get('price_month', 0))
+    name = tariff.get('name', '').lower()
+    trial_keywords = ['проб', 'trial', 'бесплатн', 'free', 'demo', 'демо']
+    return price == 0 and any(kw in name for kw in trial_keywords)
 
-def get_tariffs_keyboard(tariffs: list) -> InlineKeyboardMarkup:
+def get_tariffs_keyboard(tariffs: list, used_trial_ids: list = None) -> InlineKeyboardMarkup:
     """Клавиатура выбора тарифа"""
+    if used_trial_ids is None:
+        used_trial_ids = []
     keyboard = []
     for tariff in tariffs:
-        price_text = f"{float(tariff['price_month']):.0f}₽/мес" if float(tariff['price_month']) > 0 else "Бесплатно"
-        keyboard.append([
-            InlineKeyboardButton(
-                text=f"{tariff['name']} - {price_text}",
-                callback_data=f"tariff_{tariff['id']}"
-            )
-        ])
+        if is_trial_tariff(tariff):
+            already_used = int(tariff['id']) in used_trial_ids
+            if already_used:
+                btn_text = f"🚫 {tariff['name']} — уже использован"
+                callback = f"trial_used_{tariff['id']}"
+            else:
+                btn_text = f"{tariff['name']} — Бесплатно (24ч)"
+                callback = f"tariff_{tariff['id']}"
+        else:
+            price_m = float(tariff.get('price_month', 0))
+            price_text = f"{price_m:.0f}₽/мес" if price_m > 0 else "Бесплатно"
+            btn_text = f"{tariff['name']} - {price_text}"
+            callback = f"tariff_{tariff['id']}"
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=callback)])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def get_periods_keyboard(tariff: dict) -> InlineKeyboardMarkup:
     """Клавиатура выбора периода на основе тарифа"""
-    keyboard = []
+    # Для пробного тарифа — только кнопка на 24 часа
+    if is_trial_tariff(tariff):
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🎁 Пробный период — 24 часа (бесплатно)",
+                callback_data="period_trial"
+            )
+        ]])
 
+    keyboard = []
     if float(tariff.get('price_month', 0)) > 0:
         keyboard.append([InlineKeyboardButton(
             text=f"1 месяц - {float(tariff['price_month']):.0f} ₽",
@@ -176,25 +199,21 @@ def get_periods_keyboard(tariff: dict) -> InlineKeyboardMarkup:
             text="Бесплатно (1 месяц)",
             callback_data="period_1_month"
         )])
-
     if tariff.get('price_3months') and float(tariff['price_3months']) > 0:
         keyboard.append([InlineKeyboardButton(
             text=f"3 месяца - {float(tariff['price_3months']):.0f} ₽",
             callback_data="period_3_months"
         )])
-
     if tariff.get('price_6months') and float(tariff['price_6months']) > 0:
         keyboard.append([InlineKeyboardButton(
             text=f"6 месяцев - {float(tariff['price_6months']):.0f} ₽",
             callback_data="period_6_months"
         )])
-
     if tariff.get('price_year') and float(tariff['price_year']) > 0:
         keyboard.append([InlineKeyboardButton(
             text=f"12 месяцев - {float(tariff['price_year']):.0f} ₽",
             callback_data="period_12_months"
         )])
-
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -258,6 +277,14 @@ class Database:
                 )
             """)
             await db.commit()
+            await db.execute("""
+                            CREATE TABLE IF NOT EXISTS trial_usage (
+                                telegram_id INTEGER,
+                                tariff_id   INTEGER,
+                                used_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                PRIMARY KEY (telegram_id, tariff_id)
+                            )
+                        """)
 
     async def save_ticket(self, telegram_id: int, username: str, user_id: int, message: str) -> int:
         """Сохранить обращение в поддержку"""
@@ -322,6 +349,33 @@ class Database:
                     }
         return None
 
+    async def has_used_trial(self, telegram_id: int, tariff_id: int) -> bool:
+        """Проверить, использовал ли пользователь пробный период"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                    "SELECT 1 FROM trial_usage WHERE telegram_id = ? AND tariff_id = ?",
+                    (telegram_id, tariff_id)
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
+    async def mark_trial_used(self, telegram_id: int, tariff_id: int):
+        """Записать использование пробного периода"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO trial_usage (telegram_id, tariff_id, used_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (telegram_id, tariff_id)
+            )
+            await db.commit()
+
+    async def get_used_trial_ids(self, telegram_id: int) -> list:
+        """Получить список ID тарифов, по которым пробный уже брался"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                    "SELECT tariff_id FROM trial_usage WHERE telegram_id = ?",
+                    (telegram_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
     async def migrate_db(self):
         """Миграция базы данных - добавляет недостающие колонки"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -334,6 +388,14 @@ class Database:
                 logger.info("Adding payment_id column to pending_payments table")
                 await db.execute("ALTER TABLE pending_payments ADD COLUMN payment_id INTEGER")
                 await db.commit()
+                await db.execute("""
+                                CREATE TABLE IF NOT EXISTS trial_usage (
+                                    telegram_id INTEGER,
+                                    tariff_id   INTEGER,
+                                    used_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                    PRIMARY KEY (telegram_id, tariff_id)
+                                )
+                            """)
                 logger.info("Migration completed")
 
     async def save_session(self, telegram_id: int, user_data: dict):
@@ -1008,11 +1070,13 @@ async def buy_vpn(message: Message, state: FSMContext):
         active_tariffs = [t for t in result['tariffs'] if t.get('is_active') == '1']
 
         if active_tariffs:
+            used_trial_ids = await db.get_used_trial_ids(message.from_user.id)
+            await state.update_data(buyer_telegram_id=message.from_user.id)
             await message.answer(
                 "🛒 *Выберите тариф*\n\n"
                 "Нажмите на интересующий вас тариф для продолжения:",
                 parse_mode="Markdown",
-                reply_markup=get_tariffs_keyboard(active_tariffs)
+                reply_markup=get_tariffs_keyboard(active_tariffs, used_trial_ids)
             )
             await state.set_state(BuyVPNStates.waiting_for_tariff)
         else:
@@ -1020,7 +1084,13 @@ async def buy_vpn(message: Message, state: FSMContext):
     else:
         await message.answer("❌ Не удалось загрузить список тарифов. Попробуйте позже.")
 
-
+@dp.callback_query(BuyVPNStates.waiting_for_tariff, lambda c: c.data.startswith("trial_used_"))
+async def trial_already_used(callback: CallbackQuery, state: FSMContext):
+    await callback.answer(
+        "🚫 Вы уже использовали пробный период этого тарифа.\n"
+        "Пробный период доступен только один раз.",
+        show_alert=True
+    )
 @dp.callback_query(BuyVPNStates.waiting_for_tariff, lambda c: c.data.startswith("tariff_"))
 async def process_tariff_selection(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора тарифа"""
@@ -1036,7 +1106,17 @@ async def process_tariff_selection(callback: CallbackQuery, state: FSMContext):
             break
 
     if tariff:
-        await state.update_data(selected_tariff=tariff)
+        # Проверка пробного тарифа
+        if is_trial_tariff(tariff):
+            data = await state.get_data()
+            tg_id = data.get('buyer_telegram_id', callback.from_user.id)
+            if await db.has_used_trial(tg_id, tariff_id):
+                await callback.answer(
+                    "🚫 Вы уже использовали пробный период этого тарифа!",
+                    show_alert=True
+                )
+                return
+        await state.update_data(selected_tariff_id=tariff_id, selected_tariff=tariff)
 
         description = tariff.get('description', 'Нет описания')
         if tariff.get('features'):
@@ -1065,42 +1145,51 @@ async def process_tariff_selection(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(BuyVPNStates.waiting_for_period, lambda c: c.data.startswith("period_"))
 async def process_period_selection(callback: CallbackQuery, state: FSMContext):
     """Обработка выбора периода и генерация ключа"""
-    period = callback.data.split("_")[1]
-    period_map = {
-        "1": "1_month",
-        "3": "3_months",
-        "6": "6_months",
-        "12": "12_months"
-    }
-    period_key = period_map.get(period, f"{period}_months" if period != "1" else "1_month")
+    raw_period = callback.data.split("_", 1)[1]  # "trial", "1_month", "3_months" и т.д.
 
     data = await state.get_data()
     tariff_id = data.get('selected_tariff_id')
+    telegram_id = data.get('buyer_telegram_id', callback.from_user.id)
 
     session = await db.get_session(callback.from_user.id)
-
     if not session:
         await callback.answer("❌ Не авторизован", show_alert=True)
         await state.clear()
         return
 
-    # Отправляем запрос на генерацию ключа
-    result = await SiteAPI.generate_key(session['session_token'], tariff_id, period_key)
+    # Определяем period для API
+    if raw_period == "trial":
+        # Финальная проверка — вдруг успел нажать дважды
+        if await db.has_used_trial(telegram_id, tariff_id):
+            await callback.answer("🚫 Вы уже использовали пробный период!", show_alert=True)
+            await state.clear()
+            return
+        api_period = "trial"
+    else:
+        period_map = {
+            "1": "1_month", "3": "3_months", "6": "6_months", "12": "12_months",
+            "1_month": "1_month", "3_months": "3_months",
+            "6_months": "6_months", "12_months": "12_months",
+        }
+        api_period = period_map.get(raw_period, raw_period)
+
+    result = await SiteAPI.generate_key(session['session_token'], tariff_id, api_period)
 
     if result['success']:
-        # ОБНОВЛЯЕМ ЛОКАЛЬНЫЙ БАЛАНС
+        # Если пробный — записываем использование
+        if raw_period == "trial":
+            await db.mark_trial_used(telegram_id, tariff_id)
+
         if 'balance' in result:
             await db.update_balance(callback.from_user.id, result['balance'])
-            logger.info(f"Balance updated for user {session['username']}: new balance = {result['balance']}")
 
-        # Экранируем специальные символы для HTML
-        import html
         key = result.get('key', 'Нет ключа')
         tariff_name = result.get('tariff_name', 'Неизвестно')
-        period_text = result.get('period', 'Неизвестно')
+        period_text = "Пробный период — 24 часа" if raw_period == "trial" else result.get('period', 'Неизвестно')
         price = result.get('price', 0)
         balance = result.get('balance', 0)
         expires_at = result.get('expires_at', 'Неизвестно')
+        trial_note = "\n\n⚠️ <b>Пробный период использован. Повторно недоступен.</b>" if raw_period == "trial" else ""
 
         key_text = (
             f"✅ <b>VPN ключ успешно создан!</b>\n\n"
@@ -1110,14 +1199,13 @@ async def process_period_selection(callback: CallbackQuery, state: FSMContext):
             f"💳 <b>Ваш баланс:</b> {balance:.2f} ₽\n\n"
             f"🔐 <b>Ваш ключ:</b>\n"
             f"<code>{key}</code>\n\n"
-            f"⏰ <b>Действителен до:</b> {expires_at}\n\n"
+            f"⏰ <b>Действителен до:</b> {expires_at}"
+            f"{trial_note}\n\n"
             f"⚠️ Сохраните ключ в надежном месте!"
         )
-
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📋 Скопировать ключ", callback_data=f"copy_key_{key}")]
         ])
-
         await callback.message.edit_text(key_text, parse_mode="HTML", reply_markup=keyboard)
     else:
         error_msg = result.get('message', 'Не удалось создать ключ')
@@ -1125,14 +1213,13 @@ async def process_period_selection(callback: CallbackQuery, state: FSMContext):
             f"❌ <b>Ошибка:</b> {error_msg}\n\n"
             f"Возможные причины:\n"
             f"• Недостаточно средств на балансе\n"
-            f"• Технические проблемы\n\n"
-            f"Попробуйте позже или обратитесь к администратору.",
+            f"• Пробный период уже был использован\n"
+            f"• Технические проблемы",
             parse_mode="HTML"
         )
 
     await state.clear()
     await callback.answer()
-
 
 @dp.message(F.text == "📜 История платежей")
 async def show_payments(message: Message):
